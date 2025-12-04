@@ -11,6 +11,7 @@ from matplotlib.patches import Ellipse
 import json
 import glob
 import os
+import copy
 from collections import defaultdict
 from gmm_models_use import load_all_gmm_models as load_models
 from gmm_models_use import load_grid_templates
@@ -29,40 +30,15 @@ def select_gmm_for_grid_center(
     tpl_list = grid_templates.get((row, col), None)
     if not tpl_list:
         return None, None
-    best_candidate = None
-    best_distance = None
 
     for tpl in tpl_list:
-        cov_data = tpl.get("covariance")
-
-        if isinstance(cov_data, dict):
-            if use_median and "median" in cov_data:
-                cov_matrix = np.array(cov_data["median"], dtype=float)
-            elif "avg" in cov_data:
-                cov_matrix = np.array(cov_data["avg"], dtype=float)
-            else:
-                if len(cov_data) == 0:
-                    continue
-                # use the first available covariance entry
-                cov_matrix = np.array(next(iter(cov_data.values())),
-                                      dtype=float)
-        else:
-            cov_matrix = np.array(cov_data, dtype=float)
-
-        mean_vec = np.array(tpl["mean"], dtype=float)
-        template_candidate = {
-            "covariance": cov_matrix,
-            "n_points": tpl["n_points"],
-            "mean": mean_vec,
-            "covariance_type": tpl.get("covariance_type", "diag"),
-        }
-        distance = np.linalg.norm(grid_center - mean_vec)
-
-        if best_distance is None or distance < best_distance:
-            best_candidate = template_candidate
-            best_distance = distance
-
-    return best_candidate, best_distance
+        if tpl["covariance_type"] == "template":
+            mean_vec = np.array(tpl["mean"], dtype=float)
+            distance = np.linalg.norm(grid_center - mean_vec)
+            best_candidate = copy.deepcopy(tpl)
+            best_candidate["covariance"] = best_candidate["covariance"]["median"] if use_median else best_candidate["covariance"]["avg"]
+            return best_candidate, distance
+    return find_nearest_gmm(grid_center, tpl_list)
 
 
 def get_points_center(points):
@@ -78,7 +54,7 @@ def get_points_center(points):
     return np.mean(points, axis=0)
 
 
-def create_density_grid(points, grid_size=0.5):
+def create_density_grid(points, grid_size=0.5, descending=True):
     x_min = points[:, 0].min()
     y_min = points[:, 1].min()
 
@@ -90,8 +66,12 @@ def create_density_grid(points, grid_size=0.5):
         y_idx = int((point[1] - y_min) / grid_size)
         grid_key = (x_idx, y_idx)
         grid_counts[grid_key] += 1
+    # Sort grid cells by density (descending order)
+    sorted_cells = sorted(grid_counts.items(),
+                          key=lambda x: x[1],
+                          reverse=descending)
 
-    return grid_counts
+    return sorted_cells
 
 
 def load_all_gmm_models(data_dir):
@@ -235,17 +215,7 @@ def clustering_points(remaining_points, cov, gmm_n_points, grid_center, distance
     }
 
 
-def grid_based_iterative_clustering(points_2d, grid_templates,
-                                    grid_size=0.3,
-                                    density_threshold=0.1,
-                                    min_cluster_size=5,
-                                    max_iterations=10,
-                                    sigma_threshold=3.0,
-                                    n_points_tolerance=0.5,
-                                    top_k_grids=5,
-                                    nms_iou_threshold=0.3,
-                                    model_grid_size=5.0,
-                                    model_grid_bounds=(0.0, 0.0)):
+def grid_based_iterative_clustering(points_2d, grid_templates, **kwargs):
     """
     Grid-based iterative clustering using GMM models with NMS
 
@@ -273,11 +243,23 @@ def grid_based_iterative_clustering(points_2d, grid_templates,
         cluster_centers: List of grid centers for each cluster
         remaining_points: Unassigned points
     """
+    grid_size = kwargs.get('grid_size', 0.3)
+    density_threshold = kwargs.get('density_threshold', 0.1)
+    min_cluster_size = kwargs.get('min_cluster_size', 5)
+    max_iterations = kwargs.get('max_iterations', 10)
+    sigma_threshold = kwargs.get('sigma_threshold', 3.0)
+    n_points_tolerance = kwargs.get('n_points_tolerance', 0.5)
+    top_k_grids = kwargs.get('top_k_grids', 5)
+    nms_iou_threshold = kwargs.get('nms_iou_threshold', 0.3)
+    model_grid_size = kwargs.get('model_grid_size', 5.0)
+    model_grid_bounds = kwargs.get('model_grid_bounds', (0.0, 0.0))
     print(f"\n{'='*60}")
     print("Grid-Based Iterative GMM Clustering")
     print(f"{'='*60}")
     print(f"Point cloud size: {len(points_2d)}")
     print(f"GMM grid cells available: {len(grid_templates)}")
+    print(f"GMM grid cells size: {model_grid_size} m")
+    print(f"GMM grid cells bounds: {model_grid_bounds} m")
     print(f"Grid size: {grid_size}m")
     print(f"Density threshold: {density_threshold*100:.1f}%")
     print(f"Sigma threshold: {sigma_threshold}σ")
@@ -310,17 +292,12 @@ def grid_based_iterative_clustering(points_2d, grid_templates,
                                         1].min(), remaining_points[:, 1].max()
 
         # Count points in each grid cell
-        grid_counts = create_density_grid(
-            remaining_points, grid_size=grid_size)
-        if len(grid_counts) == 0:
+        sorted_cells = create_density_grid(
+            remaining_points, grid_size=grid_size, descending=True)
+        if len(sorted_cells) == 0:
             break
-
         # Step 2: Find top-k densest grid cells (potential cluster centers)
         print(f"Step 2: Finding top-{top_k_grids} densest grid cells...")
-
-        # Sort grid cells by density
-        sorted_cells = sorted(grid_counts.items(),
-                              key=lambda x: x[1], reverse=True)
         top_cells = sorted_cells[:min(top_k_grids, len(sorted_cells))]
 
         # Step 3: For each grid center, perform GMM clustering
@@ -579,9 +556,8 @@ if __name__ == "__main__":
     # Configuration
     data_dir = "./data"
     pcd_file = "./data/two_dense3.pcd"
-    # pcd_file = "./data_/single_lidar/A12/9309/33001.pcd"
-    # pcd_file = "/home/demo/下载/VRU_Passing_B36_002_FK_0_0/pcd/1763112313400.pcd"
-    output_file = "./grid_gmm_result.png"
+    base_name = os.path.basename(pcd_file).split(".")[0]
+    output_file = f"./result/grid_gmm_result_{base_name}.png"
 
     # Parameters
     grid_size = 0.3           # Grid cell size (meters)
@@ -595,11 +571,6 @@ if __name__ == "__main__":
 
     # Load GMM models
     print("Loading GMM models...")
-    # gmm_models = load_all_gmm_models(data_dir)
-
-    # if len(gmm_models) == 0:
-    #     print("No GMM models found. Please train models first using train_gmm.py")
-    #     exit(1)
     models_dir = './data_/single_lidar'
     models_dir = os.path.join(models_dir, "grid_models.json")
     grid_templates, model_grid_size, model_grid_bounds = load_grid_templates(
@@ -612,10 +583,6 @@ if __name__ == "__main__":
     if points_2d is None:
         print("Failed to read point cloud")
         exit(1)
-
-    print(f"Point cloud loaded: {len(points_2d)} points")
-    print(
-        f"Center: [{np.mean(points_2d[:, 0]):.3f}, {np.mean(points_2d[:, 1]):.3f}]")
 
     # Perform clustering
     clusters, cluster_gmms, cluster_centers, remaining_points, cluster_info = \
