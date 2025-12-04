@@ -38,7 +38,13 @@ def select_gmm_for_grid_center(
             best_candidate = copy.deepcopy(tpl)
             best_candidate["covariance"] = best_candidate["covariance"]["median"] if use_median else best_candidate["covariance"]["avg"]
             return best_candidate, distance
-    return find_nearest_gmm(grid_center, tpl_list)
+    tpl, distance = find_nearest_gmm(grid_center, tpl_list)
+    if tpl["covariance_type"] == "bin_template":
+        best_candidate = copy.deepcopy(tpl)
+        best_candidate["covariance"] = best_candidate["covariance"]["median"] if use_median else best_candidate["covariance"]["avg"]
+        return best_candidate, distance
+    else:
+        return tpl, distance
 
 
 def get_points_center(points):
@@ -171,16 +177,25 @@ def compute_nms_iou(cluster1_points, cluster2_points):
     return intersection / union
 
 
-def points_tolerance(gmm_n_points, n_assigned):
+def points_tolerance(gmm_n_points, n_assigned, thres=20):
     if isinstance(gmm_n_points, dict):
-        all_ratios = [n_assigned / gmm_n_points[key]
-                      for key in gmm_n_points]
-        return min(all_ratios)
+        ratio = n_assigned / gmm_n_points["median"]
+        ratio_abs = abs(ratio - 1.0)
+        return ratio, ratio_abs
     else:
         return n_assigned / gmm_n_points
 
 
-def clustering_points(remaining_points, cov, gmm_n_points, grid_center, distance, min_cluster_size=5, n_points_tolerance=0.5):
+def model_min_points(gmm_n_points):
+    if isinstance(gmm_n_points, dict):
+        return min(gmm_n_points.values())
+    else:
+        return gmm_n_points
+
+
+def clustering_points(remaining_points, cov, gmm_n_points, grid_center, distance, min_cluster_size=5, n_points_tolerance=0.5, sigma_threshold=3.0, inlier_ratio_min=0.5, mahal_threshold=2.0, init_points_num=None, init_ratio_min=0.15):
+    if init_points_num is None:
+        init_points_num = len(remaining_points)
     cov_inv = np.linalg.inv(cov)
     centered = remaining_points - grid_center
     mahal_distances = np.sqrt(
@@ -193,13 +208,17 @@ def clustering_points(remaining_points, cov, gmm_n_points, grid_center, distance
     # Calculate metrics
     inlier_ratio = n_assigned / len(remaining_points)
     mean_mahal = np.mean(mahal_distances[assigned_mask])
+    init_ratio = n_assigned / init_points_num
+    good_fit = (mean_mahal <= mahal_threshold) and (
+        inlier_ratio >= inlier_ratio_min) and (init_ratio >= init_ratio_min)
     # Validation: Check cluster size against GMM's n_points
-    n_points_ratio = points_tolerance(gmm_n_points, n_assigned)
-    n_points_deviation = abs(n_points_ratio - 1.0)
-    is_reasonable = n_points_deviation <= n_points_tolerance
+    n_points_ratio, n_points_deviation = points_tolerance(
+        gmm_n_points, n_assigned)
+    is_reasonable = (n_points_deviation <= n_points_tolerance) or good_fit
     # Calculate quality score (lower is better)
     # Combine: Mahalanobis distance + n_points deviation + distance to GMM
-    quality_score = mean_mahal + n_points_deviation + distance * 0.1
+    quality_score = mean_mahal + n_points_deviation + \
+        distance * 0.1 + (1 - init_ratio)
     print(f"    Assigned: {n_assigned} points, Ratio: {n_points_ratio:.2f}, "
           f"Quality: {quality_score:.3f}, Status: {'✓' if is_reasonable else '✗'}")
     return {
@@ -268,6 +287,7 @@ def grid_based_iterative_clustering(points_2d, grid_templates, **kwargs):
     print(f"\nInitial range check...")
     remaining_points = points_2d.copy()
     remaining_indices = np.arange(len(points_2d))
+    init_points_num = len(remaining_points)
 
     clusters = []
     cluster_gmms = []
@@ -276,6 +296,7 @@ def grid_based_iterative_clustering(points_2d, grid_templates, **kwargs):
 
     # for iteration in range(max_iterations):
     iteration = 0
+    model_found = False
     while iteration < max_iterations and len(remaining_points) >= min_cluster_size:
         iteration += 1
 
@@ -317,8 +338,6 @@ def grid_based_iterative_clustering(points_2d, grid_templates, **kwargs):
 
             nearest_gmm, distance = select_gmm_for_grid_center(
                 grid_center, grid_templates, model_grid_size, model_grid_bounds)
-            # Find nearest GMM to this grid center
-            # nearest_gmm, distance = find_nearest_gmm(grid_center, gmm_models)
 
             if nearest_gmm is None:
                 print(f"    No GMM found, skipping")
@@ -328,12 +347,14 @@ def grid_based_iterative_clustering(points_2d, grid_templates, **kwargs):
                   f"Mean=[{nearest_gmm['mean'][0]:.3f}, {nearest_gmm['mean'][1]:.3f}], "
                   f"n_points={nearest_gmm['n_points']}, Distance={distance:.3f}m")
 
+            model_found = True
+
             # Perform GMM clustering
             cov = nearest_gmm['covariance']
 
             try:
                 tmp = clustering_points(
-                    remaining_points, cov, nearest_gmm["n_points"], grid_center, distance, min_cluster_size, n_points_tolerance)
+                    remaining_points, cov, nearest_gmm["n_points"], grid_center, distance, min_cluster_size, n_points_tolerance, sigma_threshold, init_points_num=init_points_num)
                 if tmp is None:
                     continue
 
@@ -476,7 +497,7 @@ def grid_based_iterative_clustering(points_2d, grid_templates, **kwargs):
     if len(remaining_points) > 0:
         print(f"  Unassigned: {len(remaining_points)} points")
 
-    return clusters, cluster_gmms, cluster_centers, remaining_points, cluster_info
+    return clusters, cluster_gmms, cluster_centers, remaining_points, cluster_info, model_found
 
 
 def visualize_clustering_result(points_2d, clusters, cluster_gmms, cluster_centers,
@@ -543,49 +564,48 @@ def visualize_clustering_result(points_2d, clusters, cluster_gmms, cluster_cente
             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8),
             family='monospace')
 
-    plt.tight_layout()
+    # plt.tight_layout()
 
     if output_file:
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         print(f"\nVisualization saved to: {output_file}")
 
-    plt.show()
+    # plt.show()
 
 
-if __name__ == "__main__":
-    # Configuration
-    data_dir = "./data"
-    pcd_file = "./data/two_dense3.pcd"
-    base_name = os.path.basename(pcd_file).split(".")[0]
-    output_file = f"./result/grid_gmm_result_{base_name}.png"
-
+def test_main(**kwargs):
     # Parameters
-    grid_size = 0.3           # Grid cell size (meters)
-    density_threshold = 0.1   # Minimum density ratio (10%)
-    min_cluster_size = 5      # Minimum points per cluster
-    max_iterations = 100       # Maximum number of clusters
-    sigma_threshold = 3.0     # Sigma threshold for point assignment
-    n_points_tolerance = 0.5  # Tolerance for n_points validation (50%)
-    top_k_grids = 5           # Number of candidate grid centers to evaluate
-    nms_iou_threshold = 0.3   # IoU threshold for NMS (30%)
+    pcd_file = kwargs.get("pcd_file")
+    output_file = kwargs.get("output_file")
+    grid_templates = kwargs.get("grid_templates")
+    grid_size = kwargs.get("grid_size", 0.3)  # Grid cell size (meters)
+    # Minimum density ratio (10%)
+    density_threshold = kwargs.get("density_threshold", 0.1)
+    # Minimum points per cluster
+    min_cluster_size = kwargs.get("min_cluster_size", 5)
+    # Maximum number of clusters
+    max_iterations = kwargs.get("max_iterations", 100)
+    # Sigma threshold for point assignment
+    sigma_threshold = kwargs.get("sigma_threshold", 3.0)
+    # Tolerance for n_points validation (50%)
+    n_points_tolerance = kwargs.get("n_points_tolerance", 0.5)
+    top_k_grids = kwargs.get("top_k_grids", 5)
+    # IoU threshold for NMS (30%)
+    nms_iou_threshold = kwargs.get("nms_iou_threshold", 0.3)
 
-    # Load GMM models
-    print("Loading GMM models...")
-    models_dir = './data_/single_lidar'
-    models_dir = os.path.join(models_dir, "grid_models.json")
-    grid_templates, model_grid_size, model_grid_bounds = load_grid_templates(
-        models_dir)
-
+    model_grid_size = kwargs["model_grid_size"]
+    # Model grid bounds
+    model_grid_bounds = kwargs["model_grid_bounds"]
     # Read point cloud
     print(f"\nReading point cloud: {pcd_file}")
     points_2d = read_pcd_and_extract_2d(pcd_file)
 
     if points_2d is None:
         print("Failed to read point cloud")
-        exit(1)
+        return
 
     # Perform clustering
-    clusters, cluster_gmms, cluster_centers, remaining_points, cluster_info = \
+    clusters, cluster_gmms, cluster_centers, remaining_points, cluster_info, model_found = \
         grid_based_iterative_clustering(points_2d, grid_templates,
                                         grid_size=grid_size,
                                         density_threshold=density_threshold,
@@ -597,7 +617,46 @@ if __name__ == "__main__":
                                         nms_iou_threshold=nms_iou_threshold, model_grid_size=model_grid_size, model_grid_bounds=model_grid_bounds)
 
     # Visualize results
-    visualize_clustering_result(points_2d, clusters, cluster_gmms, cluster_centers,
-                                remaining_points, cluster_info, output_file)
+    if not model_found:
+        return
+    visualize_clustering_result(points_2d, clusters, cluster_gmms,
+                                cluster_centers, remaining_points, cluster_info, output_file)
+
+
+if __name__ == "__main__":
+
+    # Load GMM models
+    print("Loading GMM models...")
+    models_dir = './data/VRU_Passing_B36_002_FK_0_0/train'
+    models_dir = os.path.join(models_dir, "grid_models.json")
+    grid_templates, model_grid_size, model_grid_bounds = load_grid_templates(
+        models_dir)
+
+    debug = False
+
+    if debug:
+        pcd_file = './data/VRU_Passing_B36_002_FK_0_0/test/1763112308900/615_3.pcd'
+        base_name = os.path.basename(pcd_file).split(".")[0]
+        output_file = f"./result/{base_name}.png"
+        test_main(pcd_file=pcd_file,
+                  output_file=output_file, grid_templates=grid_templates,
+                  model_grid_size=model_grid_size, model_grid_bounds=model_grid_bounds)
+        exit(0)
+
+    data_dir = "./data/VRU_Passing_B36_002_FK_0_0/test"
+    out_dir = os.path.join("./result", os.path.basename(data_dir))
+    os.makedirs(out_dir, exist_ok=True)
+    for pcd_dir in os.listdir(data_dir):
+        tmp_out_dir = os.path.join(out_dir, pcd_dir)
+        os.makedirs(tmp_out_dir, exist_ok=True)
+        for pcd_file_ in os.listdir(os.path.join(data_dir, pcd_dir)):
+            if pcd_file_.endswith(".pcd"):
+                base_name = os.path.basename(pcd_file_).split(".")[0]
+                output_file = os.path.join(
+                    tmp_out_dir, f"{base_name}.png")
+                pcd_file = os.path.join(data_dir, pcd_dir, pcd_file_)
+                test_main(pcd_file=pcd_file,
+                          output_file=output_file, grid_templates=grid_templates,
+                          model_grid_size=model_grid_size, model_grid_bounds=model_grid_bounds)
 
     print("\nClustering complete!")

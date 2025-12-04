@@ -300,7 +300,7 @@ def print_summary_statistics(gmm_models):
 
 if __name__ == "__main__":
     # Configuration
-    data_dir = "./data/single_lidar/A12"
+    data_dir = "./data/VRU_Passing_B36_002_FK_0_0/train"
     for i in os.listdir(data_dir):
         if i.endswith(".json"):
             continue

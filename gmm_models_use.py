@@ -378,7 +378,7 @@ def grid_models(model_files,
     将 GMM models 分配到网格中
     """
     if num_thresh is None:
-        num_thresh = min(int(grid_size / 1.0), 5)
+        num_thresh = max(int(grid_size / 1.0), 5)
     if len(model_files) == 0:
         print(f"No gmm_models.json files found in ./data")
         return
@@ -500,13 +500,13 @@ def load_grid_templates(grid_models_json_path):
 if __name__ == "__main__":
     import glob
     import os
-    models_dir = './data_/single_lidar'
+    models_dir = './data/VRU_Passing_B36_002_FK_0_0/train'
     json_pattern = os.path.join(models_dir, "**/gmm_models.json")
     json_files = glob.glob(json_pattern, recursive=True)
 
     if len(json_files) == 0:
         print(f"No gmm_models.json files found in ./data")
     else:
-        out = grid_models(json_files, grid_size=3, grid_bounds=(0, 0))
+        out = grid_models(json_files, grid_size=5.0, grid_bounds=(0, 0))
         with open(os.path.join(models_dir, "grid_models.json"), 'w') as f:
             json.dump(out, f, indent=4)

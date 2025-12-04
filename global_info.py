@@ -1,5 +1,6 @@
 import numpy as np
 import math
+import open3d as o3d
 
 
 # ---------------- 距离分 bin ----------------
@@ -96,6 +97,48 @@ def grid_idx_to_point(grid_idx, grid_size, bounds) -> np.ndarray:
     y = min_y + (row + 0.5) * grid_size
     z = min_z + (col + 0.5) * grid_size
     return np.array([y, z])
+
+
+def read_pcd_and_extract_2d(filename):
+    """
+    Read PCD file and extract 2D coordinates [Y, Z]
+
+    Returns:
+        points_2d: 2D point cloud [Y, Z] or None if failed
+    """
+    try:
+        pcd = o3d.io.read_point_cloud(filename)
+        points_3d = np.asarray(pcd.points)
+
+        if points_3d.shape[0] == 0 or points_3d.shape[1] < 3:
+            return None
+
+        # Extract [Y, Z] coordinates (map to X, Y)
+        points_2d = np.column_stack([points_3d[:, 1], points_3d[:, 2]])
+
+        # Data cleaning
+        valid_mask = np.isfinite(points_2d).all(axis=1)
+        points_2d = points_2d[valid_mask]
+
+        coord_threshold = 1000
+        valid_mask = (np.abs(points_2d) < coord_threshold).all(axis=1)
+        points_2d = points_2d[valid_mask]
+
+        if len(points_2d) < 3:
+            return None
+
+        return points_2d
+
+    except Exception as e:
+        print(f"Error reading {filename}: {e}")
+        return None
+
+
+def write_pcd(points, out_path):
+    points = np.array(points)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    o3d.io.write_point_cloud(out_path, pcd)
 
 
 if __name__ == "__main__":

@@ -4,18 +4,15 @@ import open3d as o3d
 from cyber_record.record import Record
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
-import pandas as pd
 import json
+from box_obj import SIMPL_BOX_TYPE as BOX_TYPE
 
 
-BOX_TYPE = {
-    "UNKNOWN": 0,
-    "PEDESTRIAN": 1,
-    "CYCLIST": 2,
-    "CAR": 3,
-    "TRUCK": 4,
-    "BUS": 5,
-}
+def write_pcd(points, out_path):
+    points = np.array(points)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    o3d.io.write_point_cloud(out_path, pcd)
 
 
 def get_all_files(in_record_dir, key_wors=""):
@@ -60,13 +57,6 @@ def multi_process_get_boxes(all_files, box_channel, use_type=["PEDESTRIAN"], max
             if tmp:
                 boxes.update(tmp)
     return boxes
-
-
-def write_pcd(points, out_path):
-    points = np.array(points)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    o3d.io.write_point_cloud(out_path, pcd)
 
 
 def parse_point_core_numpy(point_core_bytes):
