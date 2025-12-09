@@ -17,85 +17,104 @@ from tqdm import tqdm
 from global_info import *
 
 
-""""
-离线模型
-分网格比对聚类参数的一致性
+"""
+模型训练
+1.根据接入的vru数据进行模型训练
 """
 
 
-def read_pcd_and_extract_2d(filename):
-    """
-    Read PCD file and extract 2D coordinates [Y, Z]
-    Returns:
-        points_2d: 2D point cloud [Y, Z] or None if failed
-    """
-    try:
-        pcd = o3d.io.read_point_cloud(filename)
-        points_3d = np.asarray(pcd.points)
-        if points_3d.shape[0] == 0 or points_3d.shape[1] < 3:
-            return None
-        # Extract [Y, Z] coordinates
-        points_2d = np.column_stack([points_3d[:, 1], points_3d[:, 2]])
-        # Data cleaning
-        valid_mask = np.isfinite(points_2d).all(axis=1)
-        points_2d = points_2d[valid_mask]
-        coord_threshold = 1000
-        valid_mask = (np.abs(points_2d) < coord_threshold).all(axis=1)
-        points_2d = points_2d[valid_mask]
-        if len(points_2d) < 5:  # Need at least 5 points for GMM
-            return None
-        return points_2d
-    except Exception as e:
-        print(f"Error reading {filename}: {e}")
-        return None
+class GMMTrainer(ModelScorer):
+    def __init__(self, n_components=1,
+                 max_iter=200,
+                 n_init=10,
+                 tol=1e-5,
+                 covariance_type="diag"):
+        super().__init__()
+        self.n_components = n_components
+        self.max_iter = max_iter
+        self.tol = tol
+        self.covariance_type = covariance_type
+        self.n_init = n_init
 
-
-def fit_gmm_single_file(points_2d, covariance_type='diag'):
-    """
-    Fit GMM for a single point cloud
-
-    Returns:
-        params: Dictionary with GMM parameters or None if failed
-    """
-    try:
+    def train(self, points_2d):
+        out = ResultTrainer()
         gmm = GaussianMixture(
-            n_components=1,
-            covariance_type=covariance_type,
+            n_components=self.n_components,
+            covariance_type=self.covariance_type,
             random_state=42,
-            max_iter=200,
-            n_init=10
+            max_iter=self.max_iter,
+            n_init=self.n_init,
+            tol=self.tol
         )
+        try:
+            gmm.fit(points_2d)
+            out.mean_point = gmm.means_[0].tolist()
+            if self.covariance_type == 'full':
+                cov = gmm.covariances_[0]
+            elif self.covariance_type == 'diag':
+                cov = np.diag(gmm.covariances_[0])
+            elif self.covariance_type == 'spherical':
+                cov = np.eye(2) * gmm.covariances_[0]
+            out.covariance = cov.tolist()
+            out.covariance_type = self.covariance_type
+            out.n_points = len(points_2d)
+            out.converged = bool(gmm.converged_)
+            out.n_iter = int(gmm.n_iter_)
+            out.log_likelihood = float(gmm.lower_bound_)
+            out.aic = float(gmm.aic(points_2d))
+            out.bic = float(gmm.bic(points_2d))
+            out.update = True
+            out.max_iter = self.max_iter
+            out.self_score = float(
+                self.compute_score(out, points_2d=points_2d))
+        except Exception as e:
+            print(f"Error training GMM: {e}")
+        finally:
+            return out
 
-        gmm.fit(points_2d)
+    def visualize_gmm(self, points_2d, gmm_result: ResultTrainer, output_file=None, is_show=False):
+        """
+        可视化 GMM 模型在 2D 点云上的拟合结果
+        """
+        fig, ax = plt.subplots(figsize=(14, 10))
+        colors = plt.cm.tab10(np.linspace(0, 1, 1))
+        center = gmm_result.mean_point
+        color = colors[0]
+        # Plot cluster points
+        ax.scatter(points_2d[:, 0], points_2d[:, 1],
+                   c=[colors[0]], s=50, alpha=0.6,
+                   label=f"Cluster({len(points_2d)} pts)", edgecolors='black', linewidth=0.5)
+        # Plot grid center
+        ax.scatter(center[0], center[1], c=[color], marker='X', s=300,
+                   edgecolors='black', linewidth=2, zorder=10)
+        # Draw covariance ellipses
+        cov = gmm_result.covariance
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+        for n_std in [1, 2, 3]:
+            width, height = 2 * n_std * np.sqrt(eigenvalues)
+            ellipse = Ellipse(center, width, height, angle=angle,
+                              facecolor='none', edgecolor=color,
+                              linewidth=2, linestyle='--', alpha=0.5)
+            ax.add_patch(ellipse)
+        ax.set_xlabel('X (original Y) [m]', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Y (original Z) [m]', fontsize=12, fontweight='bold')
+        ax.set_title(f'GMM Clustering Result (Score: {gmm_result.self_score:.3f})',
+                     fontsize=14, fontweight='bold')
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_aspect('equal', adjustable='datalim')
 
-        mean = gmm.means_[0]
-
-        if covariance_type == 'full':
-            cov = gmm.covariances_[0]
-        elif covariance_type == 'diag':
-            cov = np.diag(gmm.covariances_[0])
-        elif covariance_type == 'spherical':
-            cov = np.eye(2) * gmm.covariances_[0]
-
-        params = {
-            'mean': mean.tolist(),
-            'covariance': cov.tolist(),
-            'covariance_type': covariance_type,
-            'n_points': len(points_2d),
-            'converged': bool(gmm.converged_),
-            'n_iter': int(gmm.n_iter_),
-            'log_likelihood': float(gmm.lower_bound_),
-            'aic': float(gmm.aic(points_2d)),
-            'bic': float(gmm.bic(points_2d))
-        }
-
-        return params
-    except Exception as e:
-        print(f"Error fitting GMM: {e}")
-        return None
+        if output_file:
+            plt.savefig(output_file, dpi=150, bbox_inches='tight')
+            print(f"\nVisualization saved to: {output_file}")
+        if is_show:
+            plt.show()
+        plt.close(fig)
 
 
-def train_gmm_batch(data_dir, output_file, covariance_type='diag'):
+def train_gmm_batch(data_dir, output_file, covariance_type='diag',
+                    png_dir=None):
     """
     Train GMM models for all PCD files in a directory
 
@@ -119,6 +138,13 @@ def train_gmm_batch(data_dir, output_file, covariance_type='diag'):
 
     gmm_models = {}
     failed_files = []
+    gmm_trainer = GMMTrainer(
+        n_components=1,
+        max_iter=200,
+        n_init=10,
+        tol=1e-5,
+        covariance_type=covariance_type
+    )
 
     # Process each file with progress bar
     for pcd_file in tqdm(pcd_files, desc="Training GMMs"):
@@ -132,14 +158,18 @@ def train_gmm_batch(data_dir, output_file, covariance_type='diag'):
             continue
 
         # Fit GMM
-        params = fit_gmm_single_file(points_2d, covariance_type)
+        params = gmm_trainer.train(points_2d)
 
         if params is None:
             failed_files.append(filename)
             continue
+        if png_dir:
+            png_file = os.path.join(png_dir, filename.replace(".pcd", ".png"))
+            gmm_trainer.visualize_gmm(
+                points_2d, params, png_file, is_show=False)
 
         # Store parameters
-        gmm_models[filename] = params
+        gmm_models[filename] = params.to_dict()
 
     # Save to JSON file
     with open(output_file, 'w') as f:
@@ -177,7 +207,7 @@ def visualize_gmm_coverage(gmm_models, output_image=None):
     filenames = []
 
     for filename, params in gmm_models.items():
-        means.append(params['mean'])
+        means.append(params['mean_point'])
         covariances.append(params['covariance'])
         filenames.append(filename)
 
@@ -275,7 +305,7 @@ def print_summary_statistics(gmm_models):
     if len(gmm_models) == 0:
         return
 
-    means = np.array([params['mean'] for params in gmm_models.values()])
+    means = np.array([params['mean_point'] for params in gmm_models.values()])
     n_points = [params['n_points'] for params in gmm_models.values()]
     converged = [params['converged'] for params in gmm_models.values()]
 
@@ -301,6 +331,7 @@ def print_summary_statistics(gmm_models):
 if __name__ == "__main__":
     # Configuration
     data_dir = "./data/VRU_Passing_B36_002_FK_0_0/train"
+    png_dir = "./result/VRU_Passing_B36_002_FK_0_0/png/train"
     for i in os.listdir(data_dir):
         if i.endswith(".json"):
             continue
@@ -310,9 +341,12 @@ if __name__ == "__main__":
         # Save in same directory as PCD files
         output_image = os.path.join(pcd_dir, "gmm_coverage.png")
         covariance_type = 'diag'  # Options: 'full', 'diag', 'spherical'
+        i_png_dir = os.path.join(png_dir, i)
+        os.makedirs(i_png_dir, exist_ok=True)
 
         # Train GMM models
-        gmm_models = train_gmm_batch(pcd_dir, output_json, covariance_type)
+        gmm_models = train_gmm_batch(
+            pcd_dir, output_json, covariance_type, png_dir=i_png_dir)
 
         # Print statistics
         print_summary_statistics(gmm_models)

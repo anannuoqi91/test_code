@@ -1,6 +1,203 @@
+from dis import distb
 import numpy as np
 import math
 import open3d as o3d
+from typing import List
+
+
+class ResultTrainer:
+    mean_point: List[float] = []
+    covariance: List[List[float]] = [[]]
+    covariance_type: str = ""
+    n_points: int = 0
+    converged: bool = False
+    n_iter: int = 0
+    log_likelihood: float = 0.0
+    aic: float = 0.0
+    bic: float = 0.0
+    update: bool = False
+    max_iter: int = 0
+    self_score: float = 0.0
+
+    def to_dict(self):
+        return self.__dict__
+
+
+class ModelScorer:
+    def __init__(self, min_points_abs=5,
+                 ratio_low=0.2,
+                 ratio_high=2.0,
+                 ratio_good_max=8.0,
+                 ratio_bad_max=8.0):
+        self.min_points_abs = min_points_abs
+        self.ratio_low = ratio_low
+        self.ratio_high = ratio_high
+        self.ratio_good_max = ratio_good_max
+        self.ratio_bad_max = ratio_bad_max
+
+    @staticmethod
+    def mahalanobis_dist2(points, mean_point, cov):
+        """
+        points: (N,2)
+        mean: (2,)
+        cov: (2,2)
+        返回: 每个点的 d^2
+        """
+        mean_point = np.array(mean_point)
+        points = np.array(points)
+        diff = points - mean_point.reshape(1, 2)
+        cov_inv = np.linalg.inv(cov)
+        # (N,2) @ (2,2) -> (N,2), 再逐行点乘
+        tmp = diff @ cov_inv
+        d2 = np.sum(tmp * diff, axis=1)
+        return d2
+
+    @staticmethod
+    def inlier_score_by_sigma(points_2d,
+                              params: ResultTrainer,
+                              k_sigma=3.0,
+                              good_outlier_frac=0.02,  # <=2% 视为很好
+                              bad_outlier_frac=0.2):  # >=20% 视为很差
+        """
+        基于 3σ 椭圆外的点比例打一个 [0,1] 分数：
+        - outlier_frac <= good_outlier_frac -> 1.0
+        - outlier_frac >= bad_outlier_frac  -> 0.0
+        - 中间线性插值 [0.0, 1.0]
+        """
+        if len(points_2d) < 3:
+            return 0.0
+
+        d2 = ModelScorer.mahalanobis_dist2(
+            points_2d, params.mean_point, params.covariance)
+        thr = (k_sigma ** 2)  # 2D 情况下, 3σ 椭圆对应 d^2=9
+        outlier_frac = float(np.mean(d2 > thr))
+
+        if outlier_frac <= good_outlier_frac:
+            return 1.0
+        if outlier_frac >= bad_outlier_frac:
+            return 0.0
+
+        # 线性从 1 降到 0
+        score = (bad_outlier_frac - outlier_frac) / \
+            (bad_outlier_frac - good_outlier_frac)
+        return float(np.clip(score, 0.0, 1.0))
+
+    @staticmethod
+    def axis_ratio(cov):
+        """
+        计算椭圆的长宽比：sigma_max / sigma_min
+        """
+        eigvals, _ = np.linalg.eigh(cov)
+        lam_min = float(np.minimum(eigvals[0], eigvals[1]))
+        lam_max = float(np.maximum(eigvals[0], eigvals[1]))
+        if lam_min <= 0.0:
+            return 0.0
+        sigma_min = np.sqrt(lam_min)
+        sigma_max = np.sqrt(lam_max)
+        return sigma_max / (sigma_min + 1e-12)
+
+    def _shape_score_axis_ratio(self, cov):
+        """
+        根据椭圆长宽比打 [0,1] 分数：
+        - axis_ratio <= ratio_good_max  -> 1.0
+        - axis_ratio >= ratio_bad_max   -> 0.0
+        - 中间线性下降
+        """
+        if self.ratio_bad_max == self.ratio_good_max:
+            return 1.0
+        axis_ratio = ModelScorer.axis_ratio(cov)
+        if axis_ratio <= 0.0:
+            return axis_ratio
+
+        if axis_ratio <= self.ratio_good_max:
+            return 1.0
+        if axis_ratio >= self.ratio_bad_max:
+            return 0.0
+
+        score = (self.ratio_bad_max - axis_ratio) / \
+            (self.ratio_bad_max - self.ratio_good_max)
+        return float(np.clip(score, 0.0, 1.0))
+
+    def _compute_points_score(self, base_points_num, n_pts):
+        if base_points_num <= 0:
+            return 1.0
+        if n_pts < self.min_points_abs:
+            return 0.0
+        ratio = n_pts / float(base_points_num)
+        if ratio <= self.ratio_low:
+            return 0.0
+        if ratio >= self.ratio_high:
+            return 0.0
+        # 中间部分：分两段线性上升 + 下降
+        if ratio <= 1.0:
+            # 从 ratio_low 到 1.0 之间线性上升到 1
+            return (ratio - self.ratio_low) / (1.0 - self.ratio_low)
+        else:
+            # 从 1.0 到 ratio_high 之间线性下降到 0
+            return (self.ratio_high - ratio) / (self.ratio_high - 1.0)
+
+    def _score_single_model(self, params: ResultTrainer):
+        """
+        根据单个 GMM 拟合结果打一个 0~1 的质量分。
+        分数主要用于“是否大致可靠”的判断，真正的模型选择
+        （比如不同 K 比较）仍建议用相对评分（多模型一起归一化）。
+
+        params: fit_gmm_single_file 返回的 dict（至少包含 converged, n_iter, log_likelihood, aic, bic）
+        max_iter: 当时 GMM 设定的 max_iter
+        """
+        # 2) 迭代次数得分：越少越好
+        iter_ratio = params.n_iter / float(params.max_iter)
+        iter_ratio = min(max(iter_ratio, 0.0), 1.0)   # 截断到 [0,1]
+        iter_score = 1.0 - iter_ratio                # 少迭代 → 分高
+        # 3) log_likelihood / AIC / BIC 这里**不做绝对归一化**
+        #    单模型没有可比基准，只做一些“极端情况”的惩罚
+        ll = params.log_likelihood
+        aic = params.aic
+        bic = params.bic
+
+        ll_score = 1.0
+        if np.isfinite(ll):
+            ll_clipped = np.clip(ll, -1e4, 0.0)
+            ll_score = (ll_clipped + 1e4) / 1e4
+
+        aic_score = 1.0 if np.isfinite(aic) else 0.0
+        bic_score = 1.0 if np.isfinite(bic) else 0.0
+
+        w_iter = 0.8
+        w_ll = 0.1
+        w_ic = 0.1
+
+        core_score = (
+            w_iter * iter_score +
+            w_ll * ll_score +
+            w_ic * 0.5 * (aic_score + bic_score)
+        )
+        core_score = float(np.clip(core_score, 0.0, 1.0))
+        return core_score
+
+    def compute_score(self, params: ResultTrainer,
+                      base_points_num: int = 0,
+                      points_2d=None):
+        default_score = 0.0
+        if not params.update or not params.converged:
+            return default_score
+        if params.self_score > 0.0:
+            self_score = params.self_score
+        else:
+            core_score = self._score_single_model(params)
+            disturb_score = 1
+            if points_2d is not None:
+                disturb_score = ModelScorer.inlier_score_by_sigma(
+                    points_2d, params)
+            self_score = core_score * disturb_score
+        if base_points_num == 0:
+            base_points_num = params.n_points
+        points_num_score = self._compute_points_score(
+            base_points_num, params.n_points)
+        shape_score = self._shape_score_axis_ratio(params.covariance)
+        final_score = self_score * points_num_score * shape_score
+        final_score = float(np.clip(final_score, 0.0, 1.0))
+        return final_score
 
 
 # ---------------- 距离分 bin ----------------
@@ -99,7 +296,9 @@ def grid_idx_to_point(grid_idx, grid_size, bounds) -> np.ndarray:
     return np.array([y, z])
 
 
-def read_pcd_and_extract_2d(filename):
+def read_pcd_and_extract_2d(filename,
+                            filter_di_m=1000.0,
+                            filter_points_num=5):
     """
     Read PCD file and extract 2D coordinates [Y, Z]
 
@@ -119,12 +318,10 @@ def read_pcd_and_extract_2d(filename):
         # Data cleaning
         valid_mask = np.isfinite(points_2d).all(axis=1)
         points_2d = points_2d[valid_mask]
-
-        coord_threshold = 1000
-        valid_mask = (np.abs(points_2d) < coord_threshold).all(axis=1)
+        valid_mask = (np.abs(points_2d) < filter_di_m).all(axis=1)
         points_2d = points_2d[valid_mask]
 
-        if len(points_2d) < 3:
+        if len(points_2d) < filter_points_num:
             return None
 
         return points_2d
