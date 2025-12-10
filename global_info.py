@@ -3,6 +3,16 @@ import numpy as np
 import math
 import open3d as o3d
 from typing import List
+from enum import Enum
+
+
+class CovarianceType(Enum):
+    DIAG = "diag"
+    FULL = "full"
+    TEMPLATE = "template"
+    BIN_TEMPLATE = "bin_template"
+    SPHERICAL = "spherical"
+    UNKNOWN = "unknown"
 
 
 class ResultTrainer:
@@ -18,9 +28,97 @@ class ResultTrainer:
     update: bool = False
     max_iter: int = 0
     self_score: float = 0.0
+    info: str = ""
 
     def to_dict(self):
         return self.__dict__
+
+    def __setattr__(self, name, value):
+        """
+        重写属性设置方法，当修改任意属性时自动将update设置为True
+        """
+        # 调用父类的__setattr__方法设置属性
+        super().__setattr__(name, value)
+
+        # 如果修改的不是update属性本身，则自动设置update为True
+        if name != 'update':
+            super().__setattr__('update', True)
+
+    def __init__(self, **kwargs):
+        """
+        初始化方法，确保在初始化时也能正确设置update状态
+        """
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        self.update = len(kwargs) > 0
+
+
+class TemplateModel:
+    covariance_avg: List[List[float]] = [[]]
+    covariance_median: List[List[float]] = [[]]
+    min_n_points: int = 0
+    max_n_points: int = 0
+    avg_n_points: int = 0
+    median_n_points: int = 0
+    std_n_points: float = 0.0
+    valid: bool = False
+
+    def __setattr__(self, name, value):
+        """
+        重写属性设置方法，当修改任意属性时自动将valid设置为True
+        """
+        # 调用父类的__setattr__方法设置属性
+        super().__setattr__(name, value)
+
+        # 如果修改的不是valid属性本身，则自动设置valid为True
+        if name != 'valid':
+            super().__setattr__('valid', True)
+
+    def __init__(self, **kwargs):
+        """
+        初始化方法，确保在初始化时也能正确设置valid状态
+        """
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        self.valid = len(kwargs) > 0
+
+    def to_dict(self):
+        return self.__dict__
+
+
+class ModelGridInfo:
+    grid_size: float = 0.0
+    origin_y: float = 0.0
+    origin_z: float = 0.0
+    valid: bool = False
+
+    def __setattr__(self, name, value):
+        """
+        重写属性设置方法，当修改任意属性时自动将valid设置为True
+        """
+        # 调用父类的__setattr__方法设置属性
+        super().__setattr__(name, value)
+
+        # 如果修改的不是valid属性本身，则自动设置valid为True
+        if name != 'valid':
+            super().__setattr__('valid', True)
+
+    def __init__(self, grid_size=0.0, origin_y=0.0, origin_z=0.0, valid=False):
+        """
+        初始化方法，确保在初始化时也能正确设置valid状态
+        """
+        self.grid_size = grid_size
+        self.origin_y = origin_y
+        self.origin_z = origin_z
+        self.valid = valid
+
+
+class GridGMMModel:
+    covariance: List[List[float]] = [[]]
+    mean_point: List[float] = []
+    covariance_type: CovarianceType = CovarianceType.UNKNOWN
+    template_model: TemplateModel = TemplateModel()
+    n_points: int = 0
 
 
 class ModelScorer:
@@ -118,23 +216,24 @@ class ModelScorer:
             (self.ratio_bad_max - self.ratio_good_max)
         return float(np.clip(score, 0.0, 1.0))
 
-    def _compute_points_score(self, base_points_num, n_pts):
+    @staticmethod
+    def compute_points_score(base_points_num, n_pts, min_points_abs=5, ratio_low=0.2, ratio_high=2.0):
         if base_points_num <= 0:
             return 1.0
-        if n_pts < self.min_points_abs:
+        if n_pts < min_points_abs:
             return 0.0
         ratio = n_pts / float(base_points_num)
-        if ratio <= self.ratio_low:
+        if ratio <= ratio_low:
             return 0.0
-        if ratio >= self.ratio_high:
+        if ratio >= ratio_high:
             return 0.0
         # 中间部分：分两段线性上升 + 下降
         if ratio <= 1.0:
             # 从 ratio_low 到 1.0 之间线性上升到 1
-            return (ratio - self.ratio_low) / (1.0 - self.ratio_low)
+            return (ratio - ratio_low) / (1.0 - ratio_low)
         else:
             # 从 1.0 到 ratio_high 之间线性下降到 0
-            return (self.ratio_high - ratio) / (self.ratio_high - 1.0)
+            return (ratio_high - ratio) / (ratio_high - 1.0)
 
     def _score_single_model(self, params: ResultTrainer):
         """
@@ -192,12 +291,76 @@ class ModelScorer:
             self_score = core_score * disturb_score
         if base_points_num == 0:
             base_points_num = params.n_points
-        points_num_score = self._compute_points_score(
-            base_points_num, params.n_points)
+        points_num_score = ModelScorer.compute_points_score(
+            base_points_num, params.n_points, self.min_points_abs, self.ratio_low, self.ratio_high)
         shape_score = self._shape_score_axis_ratio(params.covariance)
         final_score = self_score * points_num_score * shape_score
         final_score = float(np.clip(final_score, 0.0, 1.0))
         return final_score
+
+
+def choose_center_stat(values, delta_thresh=0.2, n_small=20):
+    values = np.asarray(values)
+    mean = values.mean()
+    median = np.median(values)
+    std = values.std(ddof=0)
+
+    eps = 1e-12
+    delta = abs(mean - median) / (std + eps)
+
+    n = len(values)
+
+    # 默认用 mean
+    preferred = "mean"
+
+    # 条件 1：偏斜比较明显
+    if delta > delta_thresh:
+        preferred = "median"
+
+    # 条件 2：样本太少，优先中位数
+    if n < n_small:
+        preferred = "median"
+
+    return {
+        "mean": mean,
+        "median": median,
+        "std": std,
+        "delta": delta,
+        "preferred": preferred,
+    }
+
+
+def cal_value_score(value, center_stat, thres=10, eps=1e-12):
+    """
+    计算一个值相对于中心统计量的“好程度”：
+      - 刚好等于中心 -> 1.0 (最好)
+      - 偏离达到 thres * std -> 0.0
+      - 中间线性下降
+      - 超过阈值继续视为 0
+
+    center_stat: 之前 choose_center_stat 返回的 dict
+        - center_stat["preferred"]: "mean" 或 "median"
+        - center_stat["mean"], center_stat["median"], center_stat["std"]
+    """
+    center = center_stat[center_stat["preferred"]]
+    std = center_stat["std"]
+
+    # std 太小时要特殊处理，避免除零
+    if std < eps:
+        # 所有值都几乎一样：
+        #   如果 value 也≈center，就给满分；否则直接 0
+        return 1.0 if abs(value - center) <= thres * eps else 0.0
+
+    dist = abs(value - center)           # 距离中心有多远
+    norm = dist / (thres * std)          # 归一化到 "多少个 thres 内"
+
+    if norm >= 1.0:
+        # 超过 thres * std，视为最差
+        return 0.0
+
+    # [0, 1) 上线性映射：距离 0 -> score=1，距离 thres*std -> score=0
+    score = 1.0 - norm
+    return float(max(0.0, min(1.0, score)))
 
 
 # ---------------- 距离分 bin ----------------

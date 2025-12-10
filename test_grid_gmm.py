@@ -179,11 +179,12 @@ def compute_nms_iou(cluster1_points, cluster2_points):
 
 def points_tolerance(gmm_n_points, n_assigned, thres=20):
     if isinstance(gmm_n_points, dict):
-        ratio = n_assigned / gmm_n_points["median"]
-        ratio_abs = abs(ratio - 1.0)
-        return ratio, ratio_abs
+        points_num = gmm_n_points["median"]
     else:
-        return n_assigned / gmm_n_points
+        points_num = gmm_n_points
+    ratio = n_assigned / points_num
+    ratio_abs = abs(ratio - 1.0)
+    return ratio, ratio_abs
 
 
 def model_min_points(gmm_n_points):
@@ -350,7 +351,7 @@ def grid_based_iterative_clustering(points_2d, grid_templates, **kwargs):
             model_found = True
 
             # Perform GMM clustering
-            cov = nearest_gmm['covariance']
+            cov = np.asarray(nearest_gmm['covariance'])
 
             try:
                 tmp = clustering_points(
@@ -569,7 +570,7 @@ def visualize_clustering_result(points_2d, clusters, cluster_gmms, cluster_cente
     if output_file:
         plt.savefig(output_file, dpi=150, bbox_inches='tight')
         print(f"\nVisualization saved to: {output_file}")
-
+    plt.close(fig)
     # plt.show()
 
 
@@ -635,7 +636,7 @@ if __name__ == "__main__":
     debug = False
 
     if debug:
-        pcd_file = './data/VRU_Passing_B36_002_FK_0_0/test/1763112308900/615_3.pcd'
+        pcd_file = './data/VRU_Passing_B36_002_FK_0_0/test/1763112319900/40_1.pcd'
         base_name = os.path.basename(pcd_file).split(".")[0]
         output_file = f"./result/{base_name}.png"
         test_main(pcd_file=pcd_file,
@@ -644,7 +645,7 @@ if __name__ == "__main__":
         exit(0)
 
     data_dir = "./data/VRU_Passing_B36_002_FK_0_0/test"
-    out_dir = os.path.join("./result", os.path.basename(data_dir))
+    out_dir = os.path.join("./result/test")
     os.makedirs(out_dir, exist_ok=True)
     for pcd_dir in os.listdir(data_dir):
         tmp_out_dir = os.path.join(out_dir, pcd_dir)
