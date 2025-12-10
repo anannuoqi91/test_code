@@ -61,6 +61,7 @@ class TemplateModel:
     avg_n_points: int = 0
     median_n_points: int = 0
     std_n_points: float = 0.0
+    point_use_preferred: str = ""
     valid: bool = False
 
     def __setattr__(self, name, value):

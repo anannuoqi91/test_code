@@ -1,7 +1,6 @@
 from typing import List
 from global_info import *
 import json
-import copy
 
 
 class GridGMM:
@@ -48,7 +47,7 @@ class GridGMM:
             base_num, points_num) for points_num in points_num]
         final_scores = [a * b * c for a, b, c in zip(
             all_scores, axis_ratio_score, points_num_score)]
-        idx_sorted = np.argsort(final_scores)  # 从大到小排序的下标
+        idx_sorted = np.argsort(final_scores)  # 从小到大排序的下标
         return idx_sorted
 
     def _rm_grid_outlier_by_score(self, models: List[ResultTrainer]):
@@ -250,11 +249,13 @@ class GridGMM:
             shrinkage=shrinkage,
         )
         n_points_list = [m.n_points for m in models_list]
-        grid_templates.avg_n_points = int(np.mean(n_points_list))
-        grid_templates.median_n_points = int(np.median(n_points_list))
-        grid_templates.min_n_points = int(np.min(n_points_list))
-        grid_templates.max_n_points = int(np.max(n_points_list))
-        grid_templates.std_n_points = np.std(n_points_list)
+        out = choose_center_stat(n_points_list)
+        grid_templates.avg_n_points = int(out["mean"])
+        grid_templates.median_n_points = int(out["median"])
+        grid_templates.min_n_points = int(out["min"])
+        grid_templates.max_n_points = int(out["max"])
+        grid_templates.std_n_points = out["std"]
+        grid_templates.point_use_preferred = out["point_use_preferred"]
 
         return grid_templates
 
@@ -393,7 +394,8 @@ class GridGMM:
                         "median": i_m_model.median_n_points,
                         "min": i_m_model.min_n_points,
                         "max": i_m_model.max_n_points,
-                        "std": i_m_model.std_n_points
+                        "std": i_m_model.std_n_points,
+                        "point_use_preferred": i_m_model.point_use_preferred
                     }
                 else:
                     tmp["covariance"] = i_m.covariance
