@@ -255,7 +255,7 @@ class GridGMM:
         grid_templates.min_n_points = int(out["min"])
         grid_templates.max_n_points = int(out["max"])
         grid_templates.std_n_points = out["std"]
-        grid_templates.point_use_preferred = out["point_use_preferred"]
+        grid_templates.point_use_preferred = out["preferred"]
 
         return grid_templates
 
@@ -329,6 +329,10 @@ class GridGMM:
                 np.array(params.mean_point), self.grid_size, (self.origin_y, self.origin_z))
             bins_dict.setdefault((row, col), []).append(params)
         for key in bins_dict.keys():
+            if key == (-2, 6):
+                a = 1
+            if key == (-2, 7):
+                a = 1
             models_list = bins_dict[key]
             if len(models_list) == 0:
                 continue
@@ -463,4 +467,4 @@ if __name__ == "__main__":
         exit(1)
     gmm_models = load_all_gmm_models(json_files)
     grid_gmm = GridGMM(ModelGridInfo(5.0, 0, 0), gmm_models)
-    grid_gmm.save_grid_gmm(os.path.join(models_dir, "grid_models_new.json"))
+    grid_gmm.save_grid_gmm(os.path.join(models_dir, "grid_models_new_.json"))

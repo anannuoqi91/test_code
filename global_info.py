@@ -54,16 +54,6 @@ class ResultTrainer:
 
 
 class TemplateModel:
-    covariance_avg: List[List[float]] = [[]]
-    covariance_median: List[List[float]] = [[]]
-    min_n_points: int = 0
-    max_n_points: int = 0
-    avg_n_points: int = 0
-    median_n_points: int = 0
-    std_n_points: float = 0.0
-    point_use_preferred: str = ""
-    valid: bool = False
-
     def __setattr__(self, name, value):
         """
         重写属性设置方法，当修改任意属性时自动将valid设置为True
@@ -79,6 +69,15 @@ class TemplateModel:
         """
         初始化方法，确保在初始化时也能正确设置valid状态
         """
+        self.covariance_avg = np.zeros((2, 2), dtype=float)
+        self.covariance_median = np.zeros((2, 2), dtype=float)
+        self.min_n_points = 0
+        self.max_n_points = 0
+        self.avg_n_points = 0.0
+        self.median_n_points = 0.0
+        self.std_n_points = 0.0
+        self.point_use_preferred = None
+
         for key, value in kwargs.items():
             setattr(self, key, value)
         self.valid = len(kwargs) > 0
@@ -115,11 +114,12 @@ class ModelGridInfo:
 
 
 class GridGMMModel:
-    covariance: List[List[float]] = [[]]
-    mean_point: List[float] = []
-    covariance_type: CovarianceType = CovarianceType.UNKNOWN
-    template_model: TemplateModel = TemplateModel()
-    n_points: int = 0
+    def __init__(self):
+        self.covariance = np.zeros((2, 2), dtype=float)
+        self.mean_point = np.zeros(2, dtype=float)
+        self.covariance_type = CovarianceType.UNKNOWN
+        self.template_model = TemplateModel()
+        self.n_points = 0
 
 
 class ModelScorer:
@@ -328,6 +328,8 @@ def choose_center_stat(values, delta_thresh=0.2, n_small=20):
         "std": std,
         "delta": delta,
         "preferred": preferred,
+        "min": np.min(values),
+        "max": np.max(values),
     }
 
 
